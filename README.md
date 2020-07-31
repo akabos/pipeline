@@ -1,2 +1,3 @@
-# ventsink
+# Pipeline
+
 Generic vent-sink pipeline
