@@ -12,6 +12,12 @@ type (
 	VentFunc      func(ctx context.Context, ch chan<- interface{}) error
 	TransformFunc func(ctx context.Context, in interface{}) (interface{}, error)
 	SinkFunc      func(ctx context.Context, ch <-chan interface{}) error
+
+	Handler interface {
+		Vent(ctx context.Context, ch chan<- interface{}) error
+		Transform(ctx context.Context, in interface{}) (interface{}, error)
+		Sink(ctx context.Context, ch <-chan interface{}) error
+	}
 )
 
 func New() *Pipeline {
@@ -95,6 +101,10 @@ func (p *Pipeline) WithSinkFunc(f SinkFunc) *Pipeline {
 
 	p.sinkF = f
 	return p
+}
+
+func (p *Pipeline) WithHandler(h Handler) *Pipeline {
+	return p.WithVentFunc(h.Vent).WithTransformFunc(h.Transform).WithSinkFunc(h.Sink)
 }
 
 func (p *Pipeline) Run() error {
