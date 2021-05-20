@@ -20,6 +20,23 @@ func Unwrap(item Item) (interface{}, error) {
 	return item.Obj(), item.Err()
 }
 
+// Vent returns channel fed with struct{} continuously until the context has been canceled
+func Vent(ctx context.Context) <-chan interface{} {
+	ch := make(chan interface{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				close(ch)
+				return
+			case ch <- struct{}{}:
+				continue
+			}
+		}
+	}()
+	return ch
+}
+
 func Drain(ctx context.Context, ch <-chan Item) error {
 	for x := range ch {
 		select {
