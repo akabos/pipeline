@@ -12,6 +12,10 @@ type Item interface {
 	Err() error
 }
 
+func Wrap(obj interface{}, err error) Item {
+	return &item{obj, err}
+}
+
 func Unwrap(item Item) (interface{}, error) {
 	return item.Obj(), item.Err()
 }
