@@ -3,172 +3,130 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"golang.org/x/sync/errgroup"
 )
 
-type (
-	VentFunc      func(ctx context.Context, ch chan<- interface{}) error
-	TransformFunc func(ctx context.Context, in interface{}) (interface{}, error)
-	SinkFunc      func(ctx context.Context, ch <-chan interface{}) error
+type Item interface {
+	Obj() interface{}
+	Err() error
+}
 
-	Handler interface {
-		Vent(ctx context.Context, ch chan<- interface{}) error
-		Transform(ctx context.Context, in interface{}) (interface{}, error)
-		Sink(ctx context.Context, ch <-chan interface{}) error
+func Unwrap(item Item) (interface{}, error) {
+	return item.Obj(), item.Err()
+}
+
+func Drain(ctx context.Context, ch <-chan Item) error {
+	for x := range ch {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		_, err := Unwrap(x)
+		if err != nil {
+			return err
+		}
 	}
-)
+	return nil
+}
 
-func New() *Pipeline {
-	return &Pipeline{
-		concurrency: 2,
-		ventBuffer:  0,
-		sinkBuffer:  0,
-		ventF: func(_ context.Context, _ chan<- interface{}) error {
-			return nil
-		},
-		transformF: func(_ context.Context, in interface{}) (interface{}, error) {
-			return in, nil
-		},
-		sinkF: func(_ context.Context, ch <-chan interface{}) error {
-			for range ch {
+type Stage func(ctx context.Context, inch <-chan Item) (outch <-chan Item)
+
+type Handler func(ctx context.Context, obj interface{}, err error) (interface{}, error)
+
+type Pipeline []Stage
+
+func (p Pipeline) Run(ctx context.Context, inch <-chan interface{}) (outch <-chan Item) {
+	outch = p.generator(ctx, inch)
+	for _, stage := range p {
+		outch = stage(ctx, outch)
+	}
+	return outch
+}
+
+func (p Pipeline) generator(ctx context.Context, inch <-chan interface{}) chan Item {
+	outch := make(chan Item)
+	go func() {
+		for obj := range inch {
+			select {
+			case <-ctx.Done():
+				return
+			case outch <- &item{obj, nil}:
+				continue
 			}
-			return nil
-		},
-	}
+		}
+		close(outch)
+	}()
+	return outch
 }
 
-type Pipeline struct {
-	mu sync.Mutex
-
-	concurrency uint32
-	ventBuffer  uint32
-	sinkBuffer  uint32
-
-	ventF      VentFunc
-	transformF TransformFunc
-	sinkF      SinkFunc
+func (p Pipeline) Append(s Stage) Pipeline {
+	return append(p, s)
 }
 
-func (p *Pipeline) WithConcurrency(n uint32) *Pipeline {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if n == 0 {
-		panic("concurrency can't be 0")
-	}
-
-	p.concurrency = n
-	return p
+// AppendHandler appends a new stage to the pipeline. The stage is generated from Handler function with specified
+// concurrency and output buffer length. Output buffer effectively becomes a backlog for the next stage if there is one.
+func (p Pipeline) AppendHandler(f Handler, c, b int) Pipeline {
+	return p.Append(stageFromHandler(f, c, b))
 }
 
-func (p *Pipeline) WithVentBuffer(n uint32) *Pipeline {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.ventBuffer = n
-	return p
-}
-
-func (p *Pipeline) WithSinkBuffer(n uint32) *Pipeline {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.sinkBuffer = n
-	return p
-}
-
-func (p *Pipeline) WithVentFunc(f VentFunc) *Pipeline {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.ventF = f
-	return p
-}
-
-func (p *Pipeline) WithTransformFunc(f TransformFunc) *Pipeline {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.transformF = f
-	return p
-}
-
-func (p *Pipeline) WithSinkFunc(f SinkFunc) *Pipeline {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.sinkF = f
-	return p
-}
-
-func (p *Pipeline) WithHandler(h Handler) *Pipeline {
-	return p.WithVentFunc(h.Vent).WithTransformFunc(h.Transform).WithSinkFunc(h.Sink)
-}
-
-func (p *Pipeline) Run() error {
-	return p.RunWithContext(context.Background())
-}
-
-func (p *Pipeline) RunWithContext(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	ventCh := make(chan interface{}, p.ventBuffer)
-	sinkCh := make(chan interface{}, p.sinkBuffer)
-
-	g, ctx := errgroup.WithContext(ctx) // group to run vent and sink
-
-	g.Go(p.ventFunc(ctx, ventCh))
-	g.Go(p.sinkFunc(ctx, sinkCh))
-	g.Go(p.workerGroupFunc(ctx, ventCh, sinkCh))
-
-	return g.Wait()
-}
-
-func (p *Pipeline) workerGroupFunc(ctx context.Context, vent <-chan interface{}, sink chan<- interface{}) func() error {
-	return func() error {
-		defer close(sink)
+func stageFromHandler(f Handler, c, b int) Stage {
+	return func(ctx context.Context, inch <-chan Item) <-chan Item {
+		ctx, cancel := context.WithCancel(ctx)
 		g, ctx := errgroup.WithContext(ctx)
-		for i := uint32(0); i < p.concurrency; i++ {
-			g.Go(p.workerFunc(ctx, vent, sink))
+		outch := make(chan Item, b)
+		for i := 0; i < c; i++ {
+			g.Go(func() error {
+				defer cancel()
+				return loop(ctx, f, inch, outch)
+			})
 		}
-		return g.Wait()
-	}
-}
-
-func (p *Pipeline) workerFunc(ctx context.Context, vent <-chan interface{}, sink chan<- interface{}) func() error {
-	return func() error {
-		if p.transformF == nil {
-			return errors.New("transform function is not set")
-		}
-		for in := range vent {
-			out, err := p.transformF(ctx, in)
+		go func() {
+			err := g.Wait()
 			if err != nil {
-				return err
+				if !errors.Is(err, context.Canceled) {
+					panic(err)
+				}
 			}
-			sink <- out
-		}
-		return nil
+			close(outch)
+			cancel()
+		}()
+		return outch
 	}
 }
 
-func (p *Pipeline) ventFunc(ctx context.Context, ch chan interface{}) func() error {
-	return func() error {
-		if p.ventF == nil {
-			return errors.New("vent function is not set")
+func loop(ctx context.Context, f Handler, inch <-chan Item, outch chan<- Item) error {
+	var (
+		obj interface{}
+		err error
+	)
+	for in := range inch {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			obj, err = f(ctx, in.Obj(), in.Err())
 		}
-		defer close(ch)
-		return p.ventF(ctx, ch)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case outch <- &item{obj, err}:
+			continue
+		}
 	}
+	return nil
 }
 
-func (p *Pipeline) sinkFunc(ctx context.Context, ch <-chan interface{}) func() error {
-	return func() error {
-		if p.sinkF == nil {
-			return errors.New("sink function is not set")
-		}
-		return p.sinkF(ctx, ch)
-	}
+type item struct {
+	obj interface{}
+	err error
+}
+
+func (x *item) Obj() interface{} {
+	return x.obj
+}
+
+func (x *item) Err() error {
+	return x.err
 }

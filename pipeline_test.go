@@ -2,182 +2,83 @@ package pipeline
 
 import (
 	"context"
-	"errors"
+	"io"
 	"log"
 	"net/http"
+	"runtime"
 	"strconv"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func ExamplePipeline_Run() {
-	// Output:
+func ExamplePipeline() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	p := New().
-		WithConcurrency(10).
-		WithVentBuffer(10).
-		WithVentFunc(func(ctx context.Context, ch chan<- interface{}) error {
-			for i := 0; i < 100; i++ {
-				ch <- i
-			}
-			log.Println("vent completed")
-			return nil
-		}).
-		WithTransformFunc(func(ctx context.Context, x interface{}) (interface{}, error) {
-			i, ok := x.(int)
-			if !ok {
-				panic("invalid type in vent chan")
-			}
-			req, err := http.NewRequest(http.MethodGet, "http://httpbin.org/get?page=" + strconv.Itoa(i), nil)
-			if err != nil {
-				return nil, err
-			}
-			res, err := http.DefaultClient.Do(req.WithContext(ctx))
-			if err != nil {
-				return nil, err
-			}
-			res.Body.Close()
+	count := 12
 
-			log.Printf("request %d completed\n", i)
-			return res, nil
-		}).
-		WithSinkFunc(func(ctx context.Context, ch <-chan interface{}) error {
-			for x := range ch {
-				res, ok := x.(*http.Response)
-				if !ok {
-					panic("invalid type in sink chan")
-				}
-				log.Printf("response %s: %d\n", res.Request.URL.Query().Get("page"), res.StatusCode)
-			}
-			log.Println("sink completed")
-			return nil
-		})
-	if err := p.Run(); err != nil {
-		panic("pipe failed")
+	p := Pipeline{}
+	p = p.AppendHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+		if err != nil {
+			return nil, err
+		}
+		i := obj.(int)
+		req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get?page="+strconv.Itoa(i), nil)
+		if err != nil {
+			return nil, err
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+		log.Printf("request %d completed\n", i)
+		return res, nil
+	}, 3, 0)
+	p = p.AppendHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+		if err != nil {
+			return nil, err
+		}
+		res := obj.(*http.Response)
+		log.Printf("response %s: %d\n", res.Request.URL.Query().Get("page"), res.StatusCode)
+		return nil, nil
+	}, 1, count) // add buffer to prevent deadlock
+
+	tasks := make(chan interface{})
+	results := p.Run(ctx, tasks)
+
+	for i := 0; i < count; i++ {
+		tasks <- i
 	}
+	close(tasks)
+
+	err := Drain(ctx, results)
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
 }
 
-var errExpected = errors.New("expected error")
+func BenchmarkPipeline(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-func TestPipeline_Run(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		err := New().Run()
-		require.NoError(t, err)
-	})
+	p := Pipeline{}
+	p = p.AppendHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+		return obj, err
+	}, runtime.NumCPU(), b.N)
 
-	t.Run("vent", func(t *testing.T) {
-		err := New().
-			WithVentFunc(
-				func(ctx context.Context, vent chan<- interface{}) error {
-					for i := 0; i < 1000; i++ {
-						vent <- i
-					}
-					return nil
-				},
-			).
-			Run()
-		require.NoError(t, err)
-	})
+	inch := make(chan interface{})
+	outch := p.Run(ctx, inch)
 
-	t.Run("vent err", func(t *testing.T) {
-		err := New().
-			WithVentFunc(
-				func(ctx context.Context, vent chan<- interface{}) error {
-					return errExpected
-				},
-			).
-			Run()
-		require.Error(t, err)
-		require.Exactly(t, errExpected, err)
-	})
+	for i := 0; i < b.N; i++ {
+		inch <- i
+	}
+	close(inch)
 
-	t.Run("sink", func(t *testing.T) {
-		err := New().
-			WithConcurrency(1).
-			WithVentFunc(
-				func(ctx context.Context, vent chan<- interface{}) error {
-					for i := 0; i < 1000; i++ {
-						vent <- i
-					}
-					return nil
-				},
-			).
-			WithSinkFunc(
-				func(ctx context.Context, sink <-chan interface{}) error {
-					i := 0
-					for x := range sink {
-						j := x.(int)
-						assert.Equal(t, i, j)
-						i++
-					}
-					return nil
-				},
-			).
-			Run()
-		require.NoError(t, err)
-	})
-
-	t.Run("sink err", func(t *testing.T) {
-		err := New().
-			WithVentFunc(
-				func(ctx context.Context, vent chan<- interface{}) error {
-					vent <- nil
-					return nil
-				},
-			).
-			WithSinkFunc(
-				func(ctx context.Context, sink <-chan interface{}) error {
-					<-sink
-					return errExpected
-				},
-			).Run()
-		require.Error(t, err)
-		require.Exactly(t, errExpected, err)
-	})
-
-	t.Run("transform", func(t *testing.T) {
-		j := 0
-		err := New().
-			WithConcurrency(1).
-			WithVentFunc(
-				func(ctx context.Context, vent chan<- interface{}) error {
-					for i := 0; i < 1000; i++ {
-						vent <- i
-					}
-					return nil
-				},
-			).
-			WithTransformFunc(
-				func(ctx context.Context, x interface{}) (interface{}, error) {
-					i := x.(int)
-					assert.Equal(t, j, i)
-					j++
-					return i, nil
-				},
-			).Run()
-
-		require.NoError(t, err)
-
-	})
-
-	t.Run("transform err", func(t *testing.T) {
-		err := New().
-			WithVentFunc(
-				func(ctx context.Context, vent chan<- interface{}) error {
-					vent <- nil
-					return nil
-				},
-			).
-			WithTransformFunc(
-				func(ctx context.Context, in interface{}) (interface{}, error) {
-					return nil, errExpected
-				},
-			).Run()
-
-		require.Error(t, err)
-		require.Exactly(t, errExpected, err)
-	})
-
+	err := Drain(ctx, outch)
+	if err != nil {
+		b.Fatal(err)
+	}
 }
