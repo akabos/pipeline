@@ -56,4 +56,21 @@ func TestSplitHandler_Loop(t *testing.T) {
 		close(outch)
 		assert.Less(t, len(chanToSlice(outch)), 10)
 	})
+
+	t.Run("empty output", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		inch := itemSequence(ctx, 10)
+		outch := make(chan Item)
+
+		f := SplitHandler(func(ctx context.Context, obj interface{}, err error) ([]interface{}, error) {
+			return nil, err
+		})
+		err := f.Loop(ctx, inch, outch)
+		require.NoError(t, err)
+
+		close(outch)
+		assert.Len(t, chanToSlice(outch), 0)
+	})
 }
