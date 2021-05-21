@@ -16,8 +16,7 @@ func ExamplePipeline() {
 
 	count := 12
 
-	p := Pipeline{}
-	p = p.AppendHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+	f1 := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -34,23 +33,22 @@ func ExamplePipeline() {
 		_ = res.Body.Close()
 		log.Printf("request %d completed\n", i)
 		return res, nil
-	}, 3, 0)
-	p = p.AppendHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+	})
+
+	f2 := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
 		res := obj.(*http.Response)
 		log.Printf("response %s: %d\n", res.Request.URL.Query().Get("page"), res.StatusCode)
 		return nil, nil
-	}, 1, count) // add buffer to prevent deadlock
+	})
 
-	tasks := make(chan interface{})
-	results := p.Run(ctx, tasks)
+	p := Pipeline{}
+	p = p.AppendHandler(f1, 3, 0)
+	p = p.AppendHandler(f2, 1, count) // add buffer to prevent deadlock
 
-	for i := 0; i < count; i++ {
-		tasks <- i
-	}
-	close(tasks)
+	results := p.Run(ctx, Sequence(ctx, count))
 
 	err := Drain(ctx, results)
 	if err != nil {
@@ -64,18 +62,14 @@ func BenchmarkPipeline(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	p := Pipeline{}
-	p = p.AppendHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+	f := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
 		return obj, err
-	}, runtime.NumCPU(), b.N)
+	})
 
-	inch := make(chan interface{})
-	outch := p.Run(ctx, inch)
+	p := Pipeline{}
+	p = p.AppendHandler(f, runtime.NumCPU(), b.N)
 
-	for i := 0; i < b.N; i++ {
-		inch <- i
-	}
-	close(inch)
+	outch := p.Run(ctx, Sequence(ctx, b.N))
 
 	err := Drain(ctx, outch)
 	if err != nil {
