@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestBatchHandler_Wait(t *testing.T) {
 
 	b := BatchHandler{
 		Size: 3,
-		Wait: time.Millisecond * 450,
+		Wait: time.Millisecond * 90,
 		Process: func(ctx context.Context, in []interface{}) (out []interface{}, err error) {
 			out = append(out, in)
 			return
@@ -59,7 +60,12 @@ func TestBatchHandler_Wait(t *testing.T) {
 	inch := make(chan interface{})
 	go func() {
 		for i := 0; i < 10; i++ {
-			time.Sleep(time.Duration(i) * time.Millisecond * 100)
+			switch i {
+			case 5:
+				time.Sleep(time.Millisecond*100)
+			case 7:
+				time.Sleep(time.Millisecond*100)
+			}
 			inch <- i
 		}
 		close(inch)
@@ -74,27 +80,42 @@ func TestBatchHandler_Wait(t *testing.T) {
 		expect = [][]interface{}{
 			{0, 1, 2},
 			{3, 4},
-			{5},
-			{6},
-			{7},
-			{8},
-			{9},
+			{5, 6},
+			{7, 8, 9},
 		}
 	)
 	for i := range expect {
-		obj, err = Unwrap(<-outch)
+		x, ok := <-outch
+		require.True(t, ok)
+		obj, err = Unwrap(x)
 		require.NoError(t, err)
 		assert.Equal(t, expect[i], obj.([]interface{}))
 	}
+}
 
+func TestBatchHandler_ErrPassThrough(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Output:
-	//
-	// [0 1 2]
-	// [3 4]
-	// [5]
-	// [6]
-	// [7]
-	// [8]
-	// [9]
+	p := append(Pipeline{},
+		HandlerStage(SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+			return nil, errors.New("never succeed")
+		}), 1, 0),
+		HandlerStage(&BatchHandler{
+			Size: 2,
+			Process: func(ctx context.Context, in []interface{}) (out []interface{}, err error) {
+				panic("should never reach here")
+			},
+		}, 1, 0),
+	)
+
+	outch := p.Run(ctx, Sequence(ctx, 10))
+	out := chanToSlice(outch)
+
+	assert.Len(t, out, 10)
+	for i := range out {
+		obj, err := Unwrap(out[i].(Item))
+		assert.Nil(t, obj)
+		assert.Error(t, err)
+	}
 }

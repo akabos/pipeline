@@ -35,7 +35,6 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 			return err
 		}
 		if len(in) == 0 {
-			// input channel exhausted and closed; it's ok, just return without error
 			return nil
 		}
 		out, err = b.Process(ctx, in)
@@ -56,38 +55,53 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 }
 
 func (b *BatchHandler) batch(ctx context.Context, inch <-chan Item, outch chan<- Item) ([]interface{}, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var (
-		itm Item
+		x   Item
 		obj interface{}
 		err error
+		ok  bool
 		out = make([]interface{}, 0, b.Size)
 		t   = time.NewTimer(b.Wait)
 	)
-	defer t.Stop()
-out:
+	defer func() {
+		if !t.Stop() {
+			<-t.C
+		}
+	}()
+
 	for len(out) < b.Size {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case itm = <-inch:
-			if itm == nil {
-				break out
+			return out, err
+		case x, ok = <-inch:
+			if !ok {
+				// input channel closed, return accumulated batch
+				return out, nil
 			}
-			obj, err = Unwrap(itm)
-			if err != nil {
-				err = b.out(ctx, itm, outch)
+			obj, err = Unwrap(x)
+			if err == nil {
+				// append item to the batch
+				out = append(out, obj)
+			} else {
+				// pass through error
+				err = b.out(ctx, x, outch)
 				if err != nil {
 					return nil, err
 				}
 			}
-			out = append(out, obj)
 		case <-t.C:
+			t.Reset(b.Wait)
+			// time expired
 			if len(out) > 0 {
-				break out
+				// return accumulated batch if any
+				return out, nil
 			}
 		}
-		t.Reset(b.Wait)
 	}
+
 	return out, nil
 }
 
