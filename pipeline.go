@@ -114,7 +114,7 @@ func Drain(ctx context.Context, ch <-chan Item) error {
 	return nil
 }
 
-// Sequence returns channel fed with [0...n) sequence, if n > 0 the sequence will be continuous.
+// Sequence returns channel fed with [0...n) sequence, if n <= 0 the sequence will be infinite.
 func Sequence(ctx context.Context, n int) <-chan interface{} {
 	ch := make(chan interface{})
 	go func() {
