@@ -119,7 +119,7 @@ func Sequence(ctx context.Context, n int) <-chan interface{} {
 	ch := make(chan interface{})
 	go func() {
 	out:
-		for i := 0; n > 0 && i < n; i++ {
+		for i := 0; n < 1 || i < n; i++ {
 			select {
 			case <-ctx.Done():
 				break out
