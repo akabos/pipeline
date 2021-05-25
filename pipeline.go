@@ -9,27 +9,11 @@ import (
 
 type Pipeline []Stage
 
-func (p Pipeline) Run(ctx context.Context, inch <-chan interface{}) (outch <-chan Item) {
-	outch = p.generator(ctx, inch)
+func (p Pipeline) Run(ctx context.Context, inch <-chan Item) (outch <-chan Item) {
+	outch = inch
 	for _, stage := range p {
 		outch = stage(ctx, outch)
 	}
-	return outch
-}
-
-func (p Pipeline) generator(ctx context.Context, inch <-chan interface{}) chan Item {
-	outch := make(chan Item)
-	go func() {
-		for obj := range inch {
-			select {
-			case <-ctx.Done():
-				return
-			case outch <- Wrap(obj, nil):
-				continue
-			}
-		}
-		close(outch)
-	}()
 	return outch
 }
 
@@ -115,15 +99,15 @@ func Drain(ctx context.Context, ch <-chan Item) error {
 }
 
 // Sequence returns channel fed with [0...n) sequence, if n <= 0 the sequence will be infinite.
-func Sequence(ctx context.Context, n int) <-chan interface{} {
-	ch := make(chan interface{})
+func Sequence(ctx context.Context, n int) <-chan Item {
+	ch := make(chan Item)
 	go func() {
 	out:
 		for i := 0; n < 1 || i < n; i++ {
 			select {
 			case <-ctx.Done():
 				break out
-			case ch <- i:
+			case ch <- Wrap(i, nil):
 				continue
 			}
 		}
