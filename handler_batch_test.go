@@ -57,7 +57,7 @@ func TestBatchHandler_Wait(t *testing.T) {
 	}
 	p := append(Pipeline{}, HandlerStage(&b, 1, 0))
 
-	inch := make(chan interface{})
+	inch := make(chan Item)
 	go func() {
 		for i := 0; i < 10; i++ {
 			switch i {
@@ -66,7 +66,7 @@ func TestBatchHandler_Wait(t *testing.T) {
 			case 7:
 				time.Sleep(time.Millisecond*100)
 			}
-			inch <- i
+			inch <- Wrap(i, nil)
 		}
 		close(inch)
 	}()

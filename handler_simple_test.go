@@ -15,7 +15,7 @@ func TestSimpleHandler_Loop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		inch := itemSequence(ctx, 10)
+		inch := Sequence(ctx, 10)
 		outch := make(chan Item, 10)
 
 		f := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
@@ -41,7 +41,7 @@ func TestSimpleHandler_Loop(t *testing.T) {
 			cancel()
 		}()
 
-		inch := itemSequence(context.Background(), 10)
+		inch := Sequence(context.Background(), 10)
 		outch := make(chan Item, 10)
 
 		f := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
@@ -55,17 +55,6 @@ func TestSimpleHandler_Loop(t *testing.T) {
 		close(outch)
 		assert.Less(t, len(chanToSlice(outch)), 10)
 	})
-}
-
-func itemSequence(ctx context.Context, n int) <-chan Item {
-	ch := make(chan Item)
-	go func() {
-		for obj := range Sequence(ctx, n) {
-			ch <- Wrap(obj, nil)
-		}
-		close(ch)
-	}()
-	return ch
 }
 
 func chanToSlice(ch <-chan Item) (s []interface{}) {
