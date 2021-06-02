@@ -16,9 +16,9 @@ func TestBatchHandler(t *testing.T) {
 
 	b := BatchHandler{
 		Size: 3,
-		Process: func(ctx context.Context, in []interface{}) (out []interface{}, err error) {
-			out = append(out, in)
-			return
+		Process: func(ctx context.Context, in []interface{}, err error) ([]interface{}, error) {
+			out := []interface{}{in[:]}
+			return out, err
 		},
 	}
 	p := append(Pipeline{}, HandlerStage(&b, 1, 0))
@@ -39,7 +39,7 @@ func TestBatchHandler(t *testing.T) {
 	for i := range expect {
 		obj, err = Unwrap(<-ch)
 		require.NoError(t, err)
-		assert.Equal(t, expect[i], obj.([]interface{}))
+		assert.Equal(t, expect[i], obj)
 	}
 }
 
@@ -50,9 +50,9 @@ func TestBatchHandler_Wait(t *testing.T) {
 	b := BatchHandler{
 		Size: 3,
 		Wait: time.Millisecond * 90,
-		Process: func(ctx context.Context, in []interface{}) (out []interface{}, err error) {
-			out = append(out, in)
-			return
+		Process: func(ctx context.Context, in []interface{}, err error) ([]interface{}, error) {
+			out := []interface{}{in}
+			return out, err
 		},
 	}
 	p := append(Pipeline{}, HandlerStage(&b, 1, 0))
@@ -97,14 +97,21 @@ func TestBatchHandler_ErrPassThrough(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	e := errors.New("expected")
+
 	p := append(Pipeline{},
 		HandlerStage(SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
-			return nil, errors.New("never succeed")
+			c := obj.(int)
+			if c%2 == 0 {
+				return c, nil
+			} else {
+				return nil, e
+			}
 		}), 1, 0),
 		HandlerStage(&BatchHandler{
-			Size: 2,
-			Process: func(ctx context.Context, in []interface{}) (out []interface{}, err error) {
-				panic("should never reach here")
+			Size: 3,
+			Process: func(ctx context.Context, in []interface{}, err error) ([]interface{}, error) {
+				return in[:], err
 			},
 		}, 1, 0),
 	)
@@ -115,7 +122,11 @@ func TestBatchHandler_ErrPassThrough(t *testing.T) {
 	assert.Len(t, out, 10)
 	for i := range out {
 		obj, err := Unwrap(out[i].(Item))
-		assert.Nil(t, obj)
-		assert.Error(t, err)
+		if obj != nil {
+			assert.Equal(t, 0, obj.(int)%2)
+		}
+		if err != nil {
+			assert.True(t, errors.Is(err, e))
+		}
 	}
 }
