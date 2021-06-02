@@ -2,8 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
+
+	"github.com/hashicorp/go-multierror"
 )
 
 // BatchHandler processes inputs grouped sized batches. Receiving an error in the input, it passes it downstream
@@ -17,36 +20,61 @@ type BatchHandler struct {
 	Wait time.Duration
 
 	// Process defines callback function
-	Process func(ctx context.Context, in []interface{}) (out []interface{}, err error)
+	Process func(context.Context, []interface{}, error) ([]interface{}, error)
 }
 
 func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- Item) error {
 	var (
-		in  []interface{}
-		out []interface{}
-		err error
+		batch []Item
+		obj   interface{}
+		err   error
+
+		outObj []interface{}
+		outErr error
+
 	)
 	if b.Wait == 0 {
 		b.Wait = math.MaxInt64
 	}
 	for {
-		in, err = b.batch(ctx, inch, outch)
+		batch, err = b.batch(ctx, inch)
 		if err != nil {
 			return err
 		}
-		if len(in) == 0 {
+		if len(batch) == 0 {
 			return nil
 		}
-		out, err = b.Process(ctx, in)
-		if err != nil {
-			err = b.out(ctx, Wrap(nil, err), outch)
+
+		inObj := make([]interface{}, 0, b.Size)
+		inErr := &multierror.Error{}
+		for i := range batch {
+			obj, err = Unwrap(batch[i])
+			if obj != nil {
+				inObj = append(inObj, obj)
+			}
+			if err != nil {
+				inErr = multierror.Append(inErr, err)
+			}
+		}
+
+		outObj, outErr = b.Process(ctx, inObj, inErr)
+		for i := range outObj {
+			err = b.out(ctx, Wrap(outObj[i], nil), outch)
 			if err != nil {
 				return err
 			}
-			continue
 		}
-		for i := range out {
-			err = b.out(ctx, Wrap(out[i], nil), outch)
+
+		var errs *multierror.Error
+		if ok := errors.As(outErr, &errs); ok {
+			for i := range errs.Errors {
+				err = b.out(ctx, Wrap(nil, errs.Errors[i]), outch)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			err = b.out(ctx, Wrap(nil, err), outch)
 			if err != nil {
 				return err
 			}
@@ -54,17 +82,14 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 	}
 }
 
-func (b *BatchHandler) batch(ctx context.Context, inch <-chan Item, outch chan<- Item) ([]interface{}, error) {
+func (b *BatchHandler) batch(ctx context.Context, inch <-chan Item) (out []Item, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var (
-		x   Item
-		obj interface{}
-		err error
-		ok  bool
-		out = make([]interface{}, 0, b.Size)
-		t   = time.NewTimer(b.Wait)
+		x  Item
+		ok bool
+		t  = time.NewTimer(b.Wait)
 	)
 	defer func() {
 		if !t.Stop() {
@@ -72,37 +97,28 @@ func (b *BatchHandler) batch(ctx context.Context, inch <-chan Item, outch chan<-
 		}
 	}()
 
+	out = make([]Item, 0, b.Size)
+
+loop:
 	for len(out) < b.Size {
 		select {
 		case <-ctx.Done():
-			return out, err
+			break loop
 		case x, ok = <-inch:
 			if !ok {
 				// input channel closed, return accumulated batch
-				return out, nil
+				break loop
 			}
-			obj, err = Unwrap(x)
-			if err == nil {
-				// append item to the batch
-				out = append(out, obj)
-			} else {
-				// pass through error
-				err = b.out(ctx, x, outch)
-				if err != nil {
-					return nil, err
-				}
-			}
+			out = append(out, x)
 		case <-t.C:
 			t.Reset(b.Wait)
 			// time expired
 			if len(out) > 0 {
-				// return accumulated batch if any
-				return out, nil
+				break loop
 			}
 		}
 	}
-
-	return out, nil
+	return
 }
 
 func (b *BatchHandler) out(ctx context.Context, itm Item, outch chan<- Item) error {
