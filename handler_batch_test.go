@@ -101,6 +101,39 @@ func TestBatchHandler_ErrPassThrough(t *testing.T) {
 
 	p := append(Pipeline{},
 		HandlerStage(SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
+			return nil, e
+		}), 1, 0),
+		HandlerStage(&BatchHandler{
+			Size: 3,
+			Process: func(ctx context.Context, in []interface{}, err error) ([]interface{}, error) {
+				panic("should not reach handler")
+			},
+		}, 1, 0),
+	)
+
+	outch := p.Run(ctx, Sequence(ctx, 10))
+	out := chanToSlice(outch)
+
+	assert.Len(t, out, 10)
+	for i := range out {
+		obj, err := Unwrap(out[i].(Item))
+		if obj != nil {
+			assert.Equal(t, 0, obj.(int)%2)
+		}
+		if err != nil {
+			assert.True(t, errors.Is(err, e))
+		}
+	}
+}
+
+func TestBatchHandler_ErrPassThroughMixed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := errors.New("expected")
+
+	p := append(Pipeline{},
+		HandlerStage(SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
 			c := obj.(int)
 			if c%2 == 0 {
 				return c, nil

@@ -57,12 +57,16 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 			}
 		}
 
-		outObj, outErr = b.Process(ctx, inObj, inErr)
-		for i := range outObj {
-			err = b.out(ctx, Wrap(outObj[i], nil), outch)
-			if err != nil {
-				return err
+		if len(inObj) > 0 {
+			outObj, outErr = b.Process(ctx, inObj, inErr)
+			for i := range outObj {
+				err = b.out(ctx, Wrap(outObj[i], nil), outch)
+				if err != nil {
+					return err
+				}
 			}
+		} else {
+			outErr = inErr
 		}
 
 		var errs *multierror.Error
