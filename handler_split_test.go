@@ -45,7 +45,7 @@ func TestSplitHandler_Loop(t *testing.T) {
 		assert.True(t, errors.Is(err, context.Canceled))
 
 		close(outch)
-		assert.Less(t, len(chanToSlice(outch)), 2)
+		assert.Less(t, len(chanToSlice(outch)), 10)
 	})
 
 	t.Run("empty output", func(t *testing.T) {

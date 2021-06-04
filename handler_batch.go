@@ -28,10 +28,10 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 		batch []Item
 		obj   interface{}
 		err   error
+		errs  *multierror.Error
 
 		outObj []interface{}
 		outErr error
-
 	)
 	if b.Wait == 0 {
 		b.Wait = math.MaxInt64
@@ -45,8 +45,10 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 			return nil
 		}
 
-		inObj := make([]interface{}, 0, b.Size)
-		inErr := &multierror.Error{}
+		var (
+			inObj = make([]interface{}, 0, b.Size)
+			inErr error
+		)
 		for i := range batch {
 			obj, err = Unwrap(batch[i])
 			if obj != nil {
@@ -57,26 +59,31 @@ func (b *BatchHandler) Loop(ctx context.Context, inch <-chan Item, outch chan<- 
 			}
 		}
 
-		outObj, outErr = b.Process(ctx, inObj, inErr)
-		for i := range outObj {
-			err = b.out(ctx, Wrap(outObj[i], nil), outch)
-			if err != nil {
-				return err
-			}
-		}
-
-		var errs *multierror.Error
-		if ok := errors.As(outErr, &errs); ok {
-			for i := range errs.Errors {
-				err = b.out(ctx, Wrap(nil, errs.Errors[i]), outch)
+		if len(inObj) > 0 {
+			outObj, outErr = b.Process(ctx, inObj, inErr)
+			for i := range outObj {
+				err = b.out(ctx, Wrap(outObj[i], nil), outch)
 				if err != nil {
 					return err
 				}
 			}
 		} else {
-			err = b.out(ctx, Wrap(nil, err), outch)
-			if err != nil {
-				return err
+			outErr = inErr
+		}
+
+		if outErr != nil {
+			if ok := errors.As(outErr, &errs); ok {
+				for i := range errs.Errors {
+					err = b.out(ctx, Wrap(nil, errs.Errors[i]), outch)
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				err = b.out(ctx, Wrap(nil, outErr), outch)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}

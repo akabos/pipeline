@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,20 +31,11 @@ func TestSimpleHandler_Loop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		mux := sync.Mutex{}
-		mux.Lock()
-		cond := sync.NewCond(&mux)
-
-		go func() {
-			cond.Wait()
-			cancel()
-		}()
-
 		inch := Sequence(context.Background(), 10)
 		outch := make(chan Item, 10)
 
 		f := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
-			cond.Broadcast()
+			cancel()
 			return obj, err
 		})
 		err := f.Loop(ctx, inch, outch)
