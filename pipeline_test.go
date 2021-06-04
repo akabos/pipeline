@@ -2,26 +2,50 @@ package pipeline
 
 import (
 	"context"
+	"flag"
 	"io"
-	"log"
+	stdlog "log"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"runtime"
-	"strconv"
 	"testing"
 )
+
+var (
+	srv *httptest.Server
+	log *stdlog.Logger
+)
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if testing.Verbose() {
+		log = stdlog.New(os.Stderr, "", stdlog.Flags())
+	} else {
+		log = stdlog.New(io.Discard, "", stdlog.Flags())
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/get", func(rw http.ResponseWriter, rq *http.Request) {
+		rw.WriteHeader(http.StatusNoContent)
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	m.Run()
+}
 
 func ExamplePipeline() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	count := 12
+	count := 20
 
 	f1 := SimpleHandler(func(ctx context.Context, obj interface{}, err error) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
 		i := obj.(int)
-		req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get?page="+strconv.Itoa(i), nil)
+		req, err := http.NewRequest(http.MethodGet, srv.URL + "/get", nil)
 		if err != nil {
 			return nil, err
 		}

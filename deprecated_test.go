@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strconv"
 	"sync/atomic"
